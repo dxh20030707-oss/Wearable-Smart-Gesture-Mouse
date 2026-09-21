@@ -1,2 +1,0 @@
-[permissions]
-allow = ["Edit", "Bash(cd \"D:\\NET_PRO\\ESP32\\MPU6050 CHUKONG\" 2>$null; if ($?) { pio run 2>&1 } else { Write-Host \"Cannot find the directory\" })"]

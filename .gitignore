@@ -3,3 +3,7 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# 本地工具元数据（会话记录 / 剪贴板附件，勿上传）
+.reasonix/
+reasonix.toml
