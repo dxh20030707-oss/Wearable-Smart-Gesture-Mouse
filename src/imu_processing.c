@@ -1,11 +1,16 @@
 #include "imu_processing.h"
 #include "config.h"
+#include "mpu6050_driver.h"
 #include <math.h>
 
+// 防御性定义 PI，规避与 Arduino.h 冲突
+#ifndef PI
 #define PI 3.1415926535f
-#define GYRO_SCALE 65.5f 
+#endif
+
+#define GYRO_SCALE  65.5f 
 #define ACCEL_SCALE 16384.0f 
-#define ALPHA 0.98f 
+#define ALPHA       0.98f 
 
 static float gyro_offset_x = 0.0f;
 static float gyro_offset_y = 0.0f;
@@ -16,7 +21,6 @@ static float current_roll = 0.0f;
 static float current_yaw = 0.0f;
 
 void imu_calibrate(void) {
-    // 你的原校准逻辑，这里保持不变
     gyro_offset_x = 0.0f;
     gyro_offset_y = 0.0f;
     gyro_offset_z = 0.0f;
@@ -25,11 +29,9 @@ void imu_calibrate(void) {
     current_yaw = 0.0f;
 }
 
-// 这里的传参临时做了一下通用转换，防止你的具体驱动数据类型对不上
 euler_angles_t imu_update_angles(void *raw_data, float dt) {
     euler_angles_t angles; 
     
-    // 如果没有数据，直接返回当前角度
     angles.roll = current_roll;
     angles.pitch = current_pitch;
     angles.yaw = current_yaw;

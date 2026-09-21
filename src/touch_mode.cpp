@@ -9,6 +9,7 @@ extern BleMouse BleMouseDevice;
 extern float sensitivityList[];
 extern uint8_t currentSensIdx;
 extern uint8_t global_sens_percent;
+extern SystemConfig g_cfg;
 
 int16_t oled_touch_x = 0;
 int16_t oled_touch_y = 0;
@@ -112,7 +113,6 @@ static unsigned long lastTouchMouseSendTime = 0;
 
 static bool isDualFingerMoving = false; 
 
-// 双指不松手持续滚动组件
 static int16_t dualStartP1Y = 0;          
 static int16_t dualStartP2Y = 0;          
 static unsigned long lastAutoScrollTime = 0; 
@@ -123,9 +123,8 @@ static unsigned long lastAutoScrollTime = 0;
 #define COOLING_DOWN_MS     150  
 #define KNOB_DEBOUNCE_MS    120  
 
-// 持续滚动核心体验控制参数
-#define AUTO_SCROLL_THRESHOLD  20  // 降低门槛，滑开20像素就激活持续不松手滚动
-#define AUTO_SCROLL_INTERVAL   40  // 40ms发送一次滚轮包
+#define AUTO_SCROLL_THRESHOLD  20  
+#define AUTO_SCROLL_INTERVAL   40  
 
 void initTouchMode() {
     pinMode(PIN_M2_TIM_CH1, INPUT_PULLUP);
@@ -156,7 +155,7 @@ void initTouchMode() {
     isDualFingerMoving = false;
     lastAutoScrollTime = 0;
 
-    Serial.println("[M2] FT6336U 真实总线通道打通，自适应手势层已就绪。");
+    Serial.println("[M2] FT6336U 触控板驱动就绪。");
 }
 
 void updateTouchMode() {
@@ -179,11 +178,8 @@ void updateTouchMode() {
                 } else {
                     if (global_sens_percent > 5) global_sens_percent -= 5;
                 }
-                
-                if (global_sens_percent <= 25) currentSensIdx = 0;
-                else if (global_sens_percent <= 50) currentSensIdx = 1;
-                else if (global_sens_percent <= 75) currentSensIdx = 2;
-                else currentSensIdx = 3;
+                g_cfg.touch_dpi_level = global_sens_percent / 10;
+                saveConfigToNVS();
 
                 extern unsigned long lastOledRefreshTime;
                 lastOledRefreshTime = 0;
@@ -207,8 +203,6 @@ void updateTouchMode() {
                 oled_touch_x = p1x; oled_touch_y = p1y;
                 oled_touch2_x = p2x; oled_touch2_y = p2y;
             }
-
-            float real_sens_multiplier = sensitivityList[currentSensIdx] * 1.2f;
 
             if (touch_points > maxPointsInCurrentGesture) {
                 maxPointsInCurrentGesture = touch_points;
@@ -272,9 +266,9 @@ void updateTouchMode() {
                             }
                         }
 
-                        if (hasMoved && (abs(deltaX) > 1 || abs(deltaY) > 1)) {
-                            int16_t move_x = (int16_t)(deltaX * real_sens_multiplier);
-                            int16_t move_y = (int16_t)(deltaY * real_sens_multiplier);
+                        if (hasMoved && (abs(deltaX) > g_cfg.deadzone_px || abs(deltaY) > g_cfg.deadzone_px)) {
+                            int16_t move_x = (int16_t)(deltaX * g_cfg.touch_gain);
+                            int16_t move_y = (int16_t)(deltaY * g_cfg.touch_gain);
                             
                             if (millis() - lastTouchMouseSendTime >= 12) {
                                 lastTouchMouseSendTime = millis();
@@ -285,7 +279,7 @@ void updateTouchMode() {
                         }
                     }
                 }
-                // B. 双指无损持续滚动核心逻辑
+                // B. 双指不松手滑动滚动
                 else if (touch_points == 2) {
                     if (lastPoints != 2) {
                         if (actual_physical_points == 2) {
@@ -315,7 +309,6 @@ void updateTouchMode() {
                             lastTouchDist = currentDist;
                             lastP1Y = p1y; lastP2Y = p2y;
                         } 
-                        // 🎯 【持续滚动引擎补全修复】
                         else {
                             int16_t total_offset_p1 = p1y - dualStartP1Y;
                             int16_t total_offset_p2 = p2y - dualStartP2Y;
@@ -328,16 +321,7 @@ void updateTouchMode() {
                                 if (current_time - lastAutoScrollTime >= AUTO_SCROLL_INTERVAL) {
                                     lastAutoScrollTime = current_time;
 
-                                    // 🎯 精准隔离分流：
-                                    // 1. 手指从上往下滑（current_total_offset 为正数）：向下滚动页面
-                                    // 2. 手指从下往上划（current_total_offset 为负数）：向上滚动页面
-                                    int8_t scroll_dir = 0;
-                                    if (current_total_offset > 0) {
-                                        scroll_dir = -1; // 👈 补全向下滚轮信号
-                                    } else {
-                                        scroll_dir = 1;  // 👈 保持向上滚轮信号
-                                    }
-                                    
+                                    int8_t scroll_dir = (current_total_offset > 0) ? -1 : 1;
                                     BleMouseDevice.move(0, 0, scroll_dir);
                                 }
                             }
@@ -352,7 +336,7 @@ void updateTouchMode() {
             }
         }
         
-        // C. 手指完全抬起释放时刻
+        // C. 手指抬起判定
         if (isTouching && touch_points == 0) {
             isTouching = false;
             touchReleaseTime = millis();
