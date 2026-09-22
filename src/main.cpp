@@ -25,12 +25,8 @@ int16_t extern_mouse_y_val_if_needed();
 // ==================== 1. 全局实体变量定义 ====================
 BleMouse BleMouseDevice("ESP32-C3 SmartMouse", "Maker", 90);
 
-float sensitivityList[4] = {0.5f, 1.0f, 1.5f, 2.0f};
-uint8_t currentSensIdx = 1;
-
 uint8_t global_sens_percent = 50;
 uint8_t global_wheel_sens_percent = 50;
-bool is_ctrl_pressed = false;
 unsigned long lastOledRefreshTime = 0;
 
 int16_t global_render_dx = 0;

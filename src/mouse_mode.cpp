@@ -33,6 +33,9 @@ static float scroll_accumulator_up = 0.0f;
 static float scroll_accumulator_down = 0.0f;
 static unsigned long lastWheelTickTime = 0;
 
+// 供 OLED 显示使用的实时滚动方向（+1=向上滚, -1=向下滚, 0=静止）
+int8_t g_scroll_dir = 0;
+
 // 触摸按键逻辑电平宏（点动高电平）
 #define TOUCH_PRESSED   HIGH
 #define TOUCH_RELEASED  LOW
@@ -95,10 +98,12 @@ static void updateNormalButtons() {
                 if (currLeft == TOUCH_PRESSED) {
                     // 触摸瞬间立刻响应 1 格首包（零延迟触感）
                     BleMouseDevice.move(0, 0, 1);
+                    g_scroll_dir = 1;
                     mouseWheelCount += 1;
                     scroll_accumulator_up = 0.0f;
                 } else {
                     // 松开手指立刻刹车清零
+                    g_scroll_dir = 0;
                     scroll_accumulator_up = 0.0f;
                 }
             }
@@ -112,10 +117,12 @@ static void updateNormalButtons() {
                 if (currRight == TOUCH_PRESSED) {
                     // 触摸瞬间立刻响应 1 格首包（零延迟触感）
                     BleMouseDevice.move(0, 0, -1);
+                    g_scroll_dir = -1;
                     mouseWheelCount -= 1;
                     scroll_accumulator_down = 0.0f;
                 } else {
                     // 松开手指立刻刹车清零
+                    g_scroll_dir = 0;
                     scroll_accumulator_down = 0.0f;
                 }
             }
@@ -172,6 +179,7 @@ static void updateLockKeyLogic() {
                 is_airmouse_locked = !is_airmouse_locked;
                 
                 // 重置滚轮计数、累加器与光标滤波残余
+                g_scroll_dir = 0;
                 mouseWheelCount = 0;
                 scroll_accumulator_up = 0.0f;
                 scroll_accumulator_down = 0.0f;

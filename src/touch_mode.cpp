@@ -6,9 +6,6 @@
 #include <Wire.h>
 
 extern BleMouse BleMouseDevice;
-extern float sensitivityList[];
-extern uint8_t currentSensIdx;
-extern uint8_t global_sens_percent;
 extern SystemConfig g_cfg;
 
 int16_t oled_touch_x = 0;
@@ -22,17 +19,6 @@ uint8_t oled_click_count = 0;
 #define FT_REG_TD_STATUS    0x02  
 #define FT_REG_P1_XH        0x03  
 #define FT_REG_P2_XH        0x09  
-
-volatile int32_t encoderCount = 0;
-static int32_t lastEncoderCount = 0;
-
-extern bool is_ctrl_pressed; 
-
-void IRAM_ATTR handleEncoderM2ISR() {
-    int aState = digitalRead(PIN_M2_TIM_CH1); 
-    int bState = digitalRead(PIN_M2_TIM_CH2); 
-    if (aState == bState) encoderCount++; else encoderCount--;
-}
 
 volatile bool ft_interrupt_flag = false; 
 void IRAM_ATTR handleTouchINT_ISR() {
@@ -104,7 +90,6 @@ static bool hasMoved = false;
 static unsigned long dualTouchExitTime = 0;
 static bool wasDualScrolling = false; 
 static int16_t lastTouchDist = 0; 
-static unsigned long lastKnobTime = 0;
 static bool isDragging = false; 
 
 static unsigned long dualTouchStartTime = 0;
@@ -121,17 +106,12 @@ static unsigned long lastAutoScrollTime = 0;
 #define TIMEOUT_WINDOW      250  
 #define ZOOM_THRESHOLD      6    
 #define COOLING_DOWN_MS     150  
-#define KNOB_DEBOUNCE_MS    120  
 
 #define AUTO_SCROLL_THRESHOLD  20  
 #define AUTO_SCROLL_INTERVAL   40  
 
 void initTouchMode() {
-    pinMode(PIN_M2_TIM_CH1, INPUT_PULLUP);
-    pinMode(PIN_M2_TIM_CH2, INPUT_PULLUP);
-    encoderCount = 0;
-    lastEncoderCount = 0;
-    attachInterrupt(digitalPinToInterrupt(PIN_M2_TIM_CH1), handleEncoderM2ISR, CHANGE);
+    // 注：GPIO 0/1 原为 EC11 编码器 A/B 相，旋钮硬件已拆除，此处不再占用该引脚
 
     pinMode(PIN_M2_RST, OUTPUT);
     digitalWrite(PIN_M2_RST, HIGH); 
@@ -148,7 +128,6 @@ void initTouchMode() {
     wasDualScrolling = false;
     dualTouchExitTime = 0;
     lastTouchDist = 0;
-    lastKnobTime = 0;
     isDragging = false; 
     maxPointsInCurrentGesture = 0;
     lastTouchMouseSendTime = 0;
@@ -160,32 +139,6 @@ void initTouchMode() {
 
 void updateTouchMode() {
     if (!BleMouseDevice.isConnected()) return;
-
-    if (encoderCount != lastEncoderCount) {
-        int32_t diff = encoderCount - lastEncoderCount;
-        lastEncoderCount = encoderCount;
-        
-        if (millis() - lastKnobTime > KNOB_DEBOUNCE_MS) {
-            lastKnobTime = millis();
-            int8_t scroll_pulse = (diff > 0) ? 1 : -1;
-            
-            if (is_ctrl_pressed) {
-                BleMouseDevice.move(0, 0, scroll_pulse);
-            } 
-            else {
-                if (diff > 0) {
-                    if (global_sens_percent < 100) global_sens_percent += 5;
-                } else {
-                    if (global_sens_percent > 5) global_sens_percent -= 5;
-                }
-                g_cfg.touch_dpi_level = global_sens_percent / 10;
-                saveConfigToNVS();
-
-                extern unsigned long lastOledRefreshTime;
-                lastOledRefreshTime = 0;
-            }
-        }
-    }
 
     int16_t p1x = 0, p1y = 0, p2x = 0, p2y = 0;
     uint8_t touch_points = 0;
