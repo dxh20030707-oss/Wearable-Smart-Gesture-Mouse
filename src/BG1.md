@@ -1,6 +1,8 @@
 # 🚀 ESP32-C3 智能飞鼠/触控一体鼠标项目阶段性总结报告
 
-> **版本 v3.1 ｜ 更新日期 2026-09-21 ｜ 对应固件：三模式架构（模式 1 / 2 / 3）**
+> **版本 v3.2 ｜ 更新日期 2026-09-22 ｜ 对应固件：三模式架构（模式 1 / 2 / 3）**
+>
+> **v3.2 变更**：修复 OLED 滚轮箭头方向判定错误——原用 `mouseWheelCount % 2` 判断方向（奇偶无法表达方向，同一方向连续滚动时箭头每格翻转），改为新增 `g_scroll_dir` 实时方向状态量（`mouse_mode.cpp:37`，左/右键按下置 `+1`/`-1`、松手置 `0`），`display_mode.cpp:75-81` 按「向上 / 向下 / 静止」三态渲染。编译通过（RAM 13.6% / Flash 36.4%）。
 >
 > **v3.1 变更**：EC11 旋钮硬件已拆除，模式 2 的全部编码器代码（中断、计数、旋钮调参、`KNOB_DEBOUNCE_MS`）连同 `PIN_M2_TIM_CH1/CH2` 引脚宏一并移除；同步清理死变量 `sensitivityList` / `currentSensIdx` / `is_ctrl_pressed` 与过时注释、OLED 文案（`M2: TOUCH & KNOB` → `M2: TOUCH PAD`）。清理后重新编译通过（RAM 13.6% / Flash 36.4%）。
 >
@@ -82,14 +84,14 @@ struct SystemConfig {
   引脚宏（I2C 13-14、模式 1 18-21、模式 2 24-25、模式切换 15）、模式枚举 `SystemMode`（35）、参数结构体 `SystemConfig`（42）、模式 3 的 `CONFIG_SERVICE_UUID` / `CONFIG_CHAR_UUID`（28-29）、三个 NVS 接口与 `extern g_cfg` / `g_current_mode`（51-52）声明。
 * **`src/main.cpp`**（290 行）
   系统总入口与全局实体。参数映射与 NVS（`updateConfigGains` 47-54 / `saveConfigToNVS` 56 / `loadConfigFromNVS` 67）、**模式 3 的 GATT 服务与写回调**（`AppConfigCallbacks` 84、`ConfigServerCallbacks` 108）、**模式切换状态机**（`handleModeSwitch` 119-156）、`setup()` 三模式分支（163-210）、`loop()` 时间片调度与三套 OLED 刷新（218-288）。
-* **`src/mouse_mode.cpp`**（319 行）｜模式 1 行为层
+* **`src/mouse_mode.cpp`**（327 行）｜模式 1 行为层
   触摸按键状态机 `updateNormalButtons:43-157`（正常模式→左右键；断控模式→触摸控上下滚动 + 20ms 动力学累加连发）、断控切换 `updateLockKeyLogic:162-189`、灵敏度环形调节 `updateSensKeyLogic:194-244`、开机 50 次静态零偏标定与光标链路 `initMouseMode:249` / `updateMouseMode:277`。
 * **`src/touch_mode.cpp`**（329 行）｜模式 2 行为层
   FT6336U 双点 I2C 解析 `readFT6336U_Dual:28-79`；触控中断 `handleTouchINT_ISR:24`；初始化 `initTouchMode:113-138`；手势状态机 `updateTouchMode:140`（单指移动 / 单击双击 / 拖拽 / 双指缩放 / 双指持续滚动 / 双指轻击右键）。**v3.1 已移除全部 EC11 旋钮代码。**
-* **`src/display_mode.cpp`**（211 行）｜OLED 渲染引擎
-  模式 1 与模式 2 两套界面；依赖 `global_sens_percent` 等全局变量渲染。注意 `drawWheelConfigUI:168` 目前**无任何调用者**（见缺陷 C-9）。
+* **`src/display_mode.cpp`**（213 行）｜OLED 渲染引擎
+  模式 1 与模式 2 两套界面；依赖 `global_sens_percent` 等全局变量渲染。注意 `drawWheelConfigUI:170` 目前**无任何调用者**（见缺陷 C-8）。
 * **`src/mpu6050_driver.cpp`**（100 行，本版未改动）｜MPU6050 寄存器级初始化与 14 字节原始数据流读取。
-* **`src/imu_processing.c`**（48 行）｜姿态角解算接口，**仍为占位实现**。
+* **`src/imu_processing.c`**（50 行）｜姿态角解算接口，**仍为占位实现**。
 
 ### 5. 总体实现思路
 
@@ -141,15 +143,17 @@ struct SystemConfig {
 
 ### C. 清理项（不影响功能，但影响可读性）
 
-8. **`drawWheelConfigUI` 是死函数**：`display_mode.cpp:168` 定义、`display_mode.h:15` 声明，全项目**无任何调用者**。它在旋钮移除后更无使用可能，建议删除或明确标注为预留界面。
+8. **`drawWheelConfigUI` 是死函数**：`display_mode.cpp:170` 定义、`display_mode.h:15` 声明，全项目**无任何调用者**。它在旋钮移除后更无使用可能，建议删除或明确标注为预留界面。
 9. **速度注释数值偏差**：`mouse_mode.cpp:129-131` 注释「50% → 速度 0.35、约 57ms/格」，而按 `0.05 + 0.5 × 0.80 = 0.45`、20ms/周期计算，实际约 **0.45 / 44ms 一格**（10% 档注释 0.12，实际 0.13；100% 档 0.85 与实际一致）。注释为旧公式残留。
 10. **`imu_processing.c` 仍为占位**：互补滤波/欧拉角解算未接入主链路，光标完全依赖陀螺仪原始值积分与死区处理（模式 1 只用 `data_ptr[5]/[6]` 两个陀螺仪轴）。
 11. **显示层未接入参数体系**：`display_mode.cpp` 仍 `extern` 旧的 `global_sens_percent` / `global_wheel_sens_percent`，靠 `updateConfigGains()` 反向同步（`main.cpp:52-53`）间接渲染，属隐性耦合，建议改为直接接收 `g_cfg` 或显式传参。
+12. **`mouseWheelCount` 现在只写不读**：`display_mode.cpp` 改用 `g_scroll_dir` 后，该计数器（`mouse_mode.cpp:18`）只在触摸滚动时累加、已无任何读取者。若确认不再需要「累计滚动格数」这一信息，建议连同 4 处 `+=` / `-=` 一并删除。
 
-### ✅ 本次（v3.1）已修复项
+### ✅ 已修复项（v3.1 ~ v3.2）
 
 | 原问题 | 处理 |
 | :--- | :--- |
+| **OLED 滚轮箭头方向判定错误**：`mouseWheelCount % 2` 无法表达方向，同一方向连续滚动时箭头每格翻转一次 | 新增 `g_scroll_dir`（`mouse_mode.cpp:37`）：左/右键按下置 `+1`/`-1`、松手与断控切换时置 `0`；`display_mode.cpp:75-81` 改为「向上 / 向下 / 静止」三态渲染 |
 | 模式 2 的 EC11 中断缺少软件防抖（硬件无 RC 滤波、易反向误计数） | 旋钮硬件已拆除，**全部编码器代码删除**，问题消除 |
 | `is_ctrl_pressed` 恒为 `false`，模式 2 的「旋钮发滚轮」分支不可达 | 随编码器代码一并删除该死分支与变量 |
 | `sensitivityList` / `currentSensIdx` 死代码（零引用） | 已从 `main.cpp` 与 `touch_mode.cpp` 删除 |
