@@ -225,3 +225,261 @@ struct SystemConfig {
 | 参数 | NVS 命名空间 | `mouse_cfg` | `main.cpp:57` |
 
 > 已移除（v3.1 随 EC11 清理）：`KNOB_DEBOUNCE_MS = 120ms`、`PIN_M2_TIM_CH1/CH2`。
+
+
+# display_mode
+
+# 可穿戴智能飞鼠/触控设备 OLED 显示系统技术开发笔记
+
+---
+
+## 目录
+1. [模块概述与文件职责](#一-模块概述与文件职责)
+2. [底层显示机制与显存双缓冲](#二-底层显示机制与显存双缓冲)
+3. [模式一：空中飞鼠与滚轮断控界面 (`updateDisplayMode1`)](#三-模式一空中飞鼠与滚轮断控界面-updatedisplaymode1)
+4. [模式二：触控板与多点交互界面 (`updateDisplayMode2`)](#四-模式二触控板与多点交互界面-updatedisplaymode2)
+5. [独立滚轮配置界面 (`drawWheelConfigUI`)](#五-独立滚轮配置界面-drawwheelconfigui)
+6. [嵌入式 C/C++ 核心语法与设计技巧](#六-嵌入式-cc-核心语法与设计技巧)
+7. [Adafruit_GFX & SSD1306 常用 API 查阅表](#七-adafruit_gfx--ssd1306-常用-api-查阅表)
+
+---
+
+## 一、 模块概述与文件职责
+
+本模块是可穿戴智能交互设备（集成空中飞鼠与电容触摸板）的人机交互（HMI）显示核心，基于 I2C 接口的 0.96 寸 128×64 单色 OLED（驱动芯片为 SSD1306）。
+
+* **`display_mode.h`**：
+  * 对外导出全局唯一的显示屏驱动实例 `extern Adafruit_SSD1306 display`。
+  * 声明系统的初始化与各工作模式的画面刷新接口，供主调度循环及事件任务调用。
+* **`display_mode.cpp`**：
+  * 实现 SSD1306 对象的具体实例化与 I2C 总线初始化。
+  * 实现不同业务模式下的 UI 布局排版、数学坐标映射、动态图形绘制与显存提交。
+
+---
+
+## 二、 底层显示机制与显存双缓冲
+
+### 1. 显存结构计算
+SSD1306 控制器的屏幕物理分辨率为 $128 \times 64$ 像素。作为单色点阵屏，每个像素点仅需要 1 bit 表示开关状态（`1` 为点亮，`0` 为熄灭）：
+
+$$\text{显存总大小} = \frac{128 \times 64 \text{ bits}}{8 \text{ bits/Byte}} = 1024 \text{ Bytes} = 1 \text{ KB}$$
+
+这 1024 字节在 MCU（ESP32/STM32）的 SRAM 中分配为一个离屏缓冲区（Off-screen Framebuffer）。
+
+### 2. 双缓冲与单帧渲染生命周期
+由于 I2C 总线（标准速率 100 kHz 或快速模式 400 kHz）数据传输速率有限，如果直接对屏幕硬件逐点绘制，会造成严重的屏幕撕裂与文字残影。代码采用标准的**显存双缓冲机制**：
+
+```
+       [ 1. 帧起始：显存清零 ]
+        display.clearDisplay();
+                  │
+                  ▼
+       [ 2. 离屏渲染：写入 MCU SRAM ]
+        绘制矩形、线段、文字、位图、圆点...
+        (全部在 1KB 内存数组中进行位操作)
+                  │
+                  ▼
+       [ 3. 帧提交：DMA / I2C 硬件突发传输 ]
+        display.display();
+```
+
+* **`display.clearDisplay()`**：将 MCU 内部的 1024 字节缓冲区全部写 0。
+* **图形与文字 API**：计算像素在缓冲区中的字节偏移 `(y / 8) * 128 + x` 与位偏移 `y % 8`，并修改该 bit。
+* **`display.display()`**：将整个 1024 字节缓冲区通过 I2C 总线连续推送到 OLED 控制器的内部 GDDRAM 中，瞬间完成物理屏幕的整体更新。
+
+---
+
+## 三、 模式一：空中飞鼠与滚轮断控界面 (`updateDisplayMode1`)
+
+### 1. 业务逻辑与全局依赖
+该函数用于呈现 MPU6050 运动解算后的鼠标运行状态。通过外部状态变量 `is_airmouse_locked` 分割为两个子状态：
+
+| 运行状态 | `is_airmouse_locked` | 顶栏标题 | 核心显示内容 | 右侧动效部件 |
+| :--- | :--- | :--- | :--- | :--- |
+| **正常飞鼠** | `false` | `M1: AIR MOUSE` | 鼠标相对位移 $dX/dY$、鼠标灵敏度 | 十字雷达瞄准准星 + 动态跟踪点 |
+| **断控/滚轮**| `true` | `M1: PAUSE & SCROLL` | 滚轮状态提示、滚轮灵敏度 | 模拟滚轮外框 + 实时滚动方向三角形 |
+
+#### 跨模块参数定义（`extern` 声明）：
+* `global_sens_percent`：飞鼠指针移动的缩放百分比（1% ~ 100%）。
+* `global_wheel_sens_percent`：滚轮单次步进位移百分比（1% ~ 100%）。
+* `is_airmouse_locked`：断控切换标志位。
+* `g_scroll_dir`：滚轮实时方向（`+1` 向上滚，`-1` 向下滚，`0` 静止）。
+
+---
+
+### 2. 核心视觉组件与动态映射算法
+
+#### (1) 反显状态栏（Inverted Header）
+```cpp
+display.fillRect(0, 0, 128, 12, SSD1306_WHITE);
+display.setTextColor(SSD1306_BLACK);
+display.setCursor(4, 2);
+display.print(is_airmouse_locked ? "M1: PAUSE & SCROLL" : "M1: AIR MOUSE");
+display.setCursor(95, 2);
+display.print(is_connected ? "CONN" : "DISC");
+```
+* **实现原理**：在 $0 \le Y < 12$ 的高度内绘制一个全白矩形，随后将文本前景色设置为 `SSD1306_BLACK`。黑字白底能与下方的暗色工作区形成明显的视觉区隔。
+
+#### (2) 动态准星雷达图（Radar Crosshair）
+在正常飞鼠状态下，屏幕右侧 $(104, 33)$ 处生成一个微型准星：
+* 外圆环：半径为 8 px 的空心圆。
+* 十字线：长 24 px 的水平线与垂直线，正中心穿过圆心。
+* **位置约束与映射（Clamping）**：
+  ```cpp
+  int16_t offset_x = constrain(x, -6, 6);
+  int16_t offset_y = constrain(y, -6, 6);
+  display.fillCircle(centerX + offset_x, centerY + offset_y, 2, SSD1306_WHITE);
+  ```
+  * **数学意义**：鼠标高速甩动时，$dX, dY$ 可能会达到几十甚至上百。为防止中心指示点脱离雷达外框，通过 `constrain()` 函数将位移严格钳位在 $[-6, +6]$ 像素闭区间内，确保指示点始终在半径为 8 的雷达圆内受限运动。
+
+#### (3) 滚轮滚动动态动画
+在断控滚轮状态下，右侧 $(108, 33)$ 绘制带有圆角的模拟滚轮外框（长宽 $12 \times 24$ px）：
+* **方向判定渲染**：
+  * `g_scroll_dir > 0`（向上滚动）：绘制实心向上三角形顶点在 $(108, 25)$。
+  * `g_scroll_dir < 0`（向下滚动）：绘制实心向下三角形顶点在 $(108, 41)$。
+  * `g_scroll_dir == 0`（静止无操作）：在圆心绘制半径为 2 px 的微小实心圆点。
+
+#### (4) 底部自适应灵敏度进度条
+位于屏幕底部（$X=4, Y=52, W=120, H=6$）：
+```cpp
+uint8_t current_render_percent = is_airmouse_locked ? global_wheel_sens_percent : global_sens_percent;
+int fill_w = (int)((float)current_render_percent / 100.0f * (bar_w - 4));
+display.fillRect(bar_x + 2, bar_y + 2, fill_w, bar_h - 4, SSD1306_WHITE);
+```
+* **线性变换公式**：
+  $$\text{fill\_w} = \left\lfloor \frac{P}{100.0} \times (W_{\text{bar}} - 4) \right\rfloor$$
+  其中 $P \in [1, 100]$，可填充最大宽度为 $120 - 4 = 116\text{ px}$。
+
+---
+
+## 四、 模式二：触控板与多点交互界面 (`updateDisplayMode2`)
+
+### 1. 业务逻辑与全局依赖
+该函数主要对接电容式触摸屏（如 FT6336U）。根据检测到的物理触点数量 `oled_touch_points` 分为两类视觉布局：
+
+| 触摸状态 | `oled_touch_points` | 顶栏标题 | 数据显示区 |
+| :--- | :--- | :--- | :--- |
+| **单指触控** | `1` | `M2: TOUCH PAD` | 单点坐标 $(X, Y)$、连续点击次数队列 |
+| **双指触控** | `2` | `M2: DUAL-TOUCH`| 点1坐标、点2坐标、两点欧氏间距 |
+
+#### 跨模块参数定义（`extern` 声明）：
+* `oled_touch2_x`, `oled_touch2_y`：第二个触点的绝对物理坐标。
+* `oled_touch_points`：当前有效触点数（1 或 2）。
+* `oled_click_count`：当前连击计数值（0 ~ 5）。
+
+---
+
+### 2. 核心数学计算与图形渲染
+
+#### (1) 双触点空间欧几里得距离计算
+```cpp
+int16_t dist = sqrt(pow(x - oled_touch2_x, 2) + pow(y - oled_touch2_y, 2));
+display.printf("Dist: %d px", dist);
+```
+* **原理**：利用勾股定理计算两个触点的直线像素距离：
+  $$d = \sqrt{(x_1 - x_2)^2 + (y_1 - y_2)^2}$$
+  在双指手势算法中，该数值的实时变化率是判定 Pinch-to-Zoom（双指缩放）的核心输入量。
+
+#### (2) 点击队列图标绘制
+```cpp
+display.print("Click Que: ");
+for(int i = 0; i < oled_click_count; i++) {
+    display.fillCircle(68 + (i * 10), 35, 3, SSD1306_WHITE);
+}
+if(oled_click_count == 0) display.print("none");
+```
+* **逻辑**：采用计数循环将点击事件以排队点的方式沿 X 轴水平分布（步进 10 px），直观呈现状态机捕获的双击或多击动作。
+
+#### (3) 虚拟触摸视口与相对映射
+在屏幕右侧开辟了一个微缩的虚拟触摸板视口矩形（$X=92, Y=16, W=34, H=44$）：
+* **虚线网格绘制**：
+  ```cpp
+  for(int i = box_x + 2; i < box_x + box_w; i += 4) display.drawPixel(i, box_y + (box_h / 2), SSD1306_WHITE);
+  for(int j = box_y + 2; j < box_y + box_h; j += 4) display.drawPixel(box_x + (box_w / 2), j, SSD1306_WHITE);
+  ```
+  以步进 4 像素画点，形成水平和垂直的中心参考虚线十字网格。
+* **触点微缩映射（取模限制）**：
+  ```cpp
+  int m1_x = box_x + 2 + (abs(x) % (box_w - 4));
+  int m1_y = box_y + 2 + (abs(y) % (box_h - 4));
+  ```
+  * **原理**：触摸屏的物理坐标（如 $0 \sim 320$）远大于虚拟视口尺寸（有效绘制区域仅 $30 \times 40$ px）。通过 `abs(coord) % (bound - 4)` 快速将坐标折叠在视口边界内，利用 5 像素的十字光标指示指尖触点。
+* **双指中点（Centroid）计算**：
+  ```cpp
+  display.drawPixel((m1_x + m2_x) / 2, (m1_y + m2_y) / 2, SSD1306_WHITE);
+  ```
+  在两个触点的几何中心点亮单像素点，可用于辅助观察手势中心旋转或平移基准。
+
+---
+
+## 五、 独立滚轮配置界面 (`drawWheelConfigUI`)
+
+该函数是一套独立的滚轮参数调测界面，用于展示浮点型灵敏度倍率与滚动状态指示。
+
+### 1. 浮点灵敏度向进度条映射
+函数接收 `float wheel_sens`（典型输入范围为 $1.0 \sim 4.0$）：
+```cpp
+float percent = (wheel_sens - 1.0f) / 3.0f;
+int fill_w = (int)(percent * (bar_w - 4));
+if (fill_w < 1 && wheel_sens > 0) fill_w = 4;
+```
+* **归一化算法**：
+  $$\text{percent} = \frac{\text{wheel\_sens} - 1.0}{4.0 - 1.0} = \frac{\text{wheel\_sens} - 1.0}{3.0}$$
+* **边界防御保护**：当 $\text{wheel\_sens} > 0$ 但计算出的宽度小于 1 px 时，强制赋予 4 px 的最小宽度保底，避免用户在低灵敏度下看到空进度条而误以为设备断电或参数清零。
+
+---
+
+## 六、 嵌入式 C/C++ 核心语法与设计技巧
+
+### 1. `extern` 关键字与多文件链接
+* **语法含义**：在 `.cpp` 文件顶部书写 `extern uint8_t global_sens_percent;`，告知编译器该变量在外部其他目标文件（如 `mouse_mode.cpp`）中已完成内存分配，当前文件仅生成未解析的符号引用，由链接器（Linker）统一做符号地址绑定。
+* **工程优势**：确保全局状态唯一性，避免在多个源文件中重复定义导致的 `multiple definition of ...` 错误。
+
+### 2. 格式化输出对齐防抖动：`printf` 左对齐占位符
+```cpp
+display.printf("dX: %-4d  dY: %-4d", x, y);
+display.printf("P1 X:%-3d Y:%-3d", x, y);
+```
+* **占位符解析**：
+  * `%d`：有符号十进制整数输出。
+  * `4`：字段最小宽度为 4 个字符。
+  * `-`：**强制左对齐**（默认右对齐）。
+* **UI 防抖设计考量**：在 OLED 上绘制字符时，如果数值从 `-12` 突变到 `5`，若不固定字符宽度，文本总长度会改变，导致后面的标签发生水平抖动，甚至在无背景擦除模式下留下上一帧的字符残影。左对齐固定占位符能够保证数据展示的几何对齐稳定性。
+
+### 3. 数值限幅：`constrain(amt, low, high)`
+```cpp
+int16_t offset_x = constrain(x, -6, 6);
+```
+* Arduino 核心标准宏函数，等价于：
+  $$\text{result} = \begin{cases} low & \text{if } amt < low \\ high & \text{if } amt > high \\ amt & \text{otherwise} \end{cases}$$
+* 常用于嵌入式图形界面中防止光标脱出视口外边框，引发数组越界或破坏其他区域显存。
+
+### 4. 头文件包含防卫宏（Include Guard）
+```cpp
+#ifndef DISPLAY_MODE_H
+#define DISPLAY_MODE_H
+// ... 声明内容 ...
+#endif // DISPLAY_MODE_H
+```
+* 避免同一个头文件在复杂的工程依赖中被多次包含，消除预处理阶段结构体、类或函数声明的重复定义冲突。
+
+---
+
+## 七、 Adafruit_GFX & SSD1306 常用 API 查阅表
+
+| 函数原型 | 核心功能说明 | 渲染注意事项 / 性能建议 |
+| :--- | :--- | :--- |
+| `begin(vcc_state, i2c_addr)` | 初始化 SSD1306 硬件，配置电荷泵与 I2C 通信地址（默认 `0x3C`）。 | 若返回 `false` 说明 I2C 接线异常或地址错误，需卡住并排查。 |
+| `clearDisplay()` | 将 MCU 本地显存缓冲区全部写 0。 | **每帧绘制前必须调用**，否则新画面会与上一帧重叠。 |
+| `display()` | 将 1KB 本地缓冲区通过 I2C 整体刷新到屏幕硬件。 | **每帧最后调用一次**。切忌在循环或每个图形后调用，否则大幅降低帧率。 |
+| `setTextWrap(bool)` | 设置文本遇到右边界是否自动换行。 | 设为 `false` 可防止动态数据过长时换行覆盖下一行界面。 |
+| `setCursor(x, y)` | 移动文本输出起始光标坐标（像素单位）。 | 字体基线以此为基础排版，默认字高通常为 8 px。 |
+| `setTextColor(c)` | 设置文本前景色（`SSD1306_WHITE` 或 `SSD1306_BLACK`）。 | 配合 `fillRect` 背景可快速实现反显高亮状态栏。 |
+| `drawFastHLine(x, y, w, c)`| 快速水平线绘制。 | 算法进行了按字节对齐优化，**执行速度显著快于 `drawLine`**。 |
+| `drawFastVLine(x, y, h, c)`| 快速垂直线绘制。 | 算法内部针对位操作优化，绘制纵向分割线首选。 |
+| `drawRect(x, y, w, h, c)`  | 绘制矩形空心线框。 | 适用于外视口、进度条槽等边界容器。 |
+| `fillRect(x, y, w, h, c)`  | 绘制实心填充矩形。 | 常用于反显背景擦除、进度条填充。 |
+| `drawCircle(x, y, r, c)`   | 绘制空心圆（Bresenham 算法）。 | 常用于瞄准环、静态指示圆环。 |
+| `fillCircle(x, y, r, c)`   | 绘制实心圆。 | 常用于光标点、队列状态指示点。 |
+| `fillTriangle(...)`        | 绘制实心三角形。 | 传入三个顶点坐标，常用于滚动方向、展开折叠等指示箭头。 |
+| `drawPixel(x, y, c)`       | 控制单像素点亮/熄灭。 | 性能开销较低，适合通过循环绘制网格虚线或散点图。 |
