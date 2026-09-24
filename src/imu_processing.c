@@ -8,7 +8,7 @@
 #define PI 3.1415926535f
 #endif
 
-#define GYRO_SCALE  65.5f 
+#define GYRO_SCALE  65.5f  // 陀螺仪比例因子
 #define ACCEL_SCALE 16384.0f 
 #define ALPHA       0.98f 
 
