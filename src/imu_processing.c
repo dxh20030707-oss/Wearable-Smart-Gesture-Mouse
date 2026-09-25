@@ -20,7 +20,7 @@ static float current_pitch = 0.0f; // 当前俯仰角
 static float current_roll = 0.0f; // 当前翻滚角
 static float current_yaw = 0.0f; // 当前偏航角
 
-void imu_calibrate(void) {
+void imu_calibrate(void) { // 校准陀螺仪偏移量
     gyro_offset_x = 0.0f;
     gyro_offset_y = 0.0f;
     gyro_offset_z = 0.0f;
