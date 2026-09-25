@@ -9,8 +9,8 @@
 #endif
 
 #define GYRO_SCALE  65.5f  // 陀螺仪比例因子
-#define ACCEL_SCALE 16384.0f 
-#define ALPHA       0.98f 
+#define ACCEL_SCALE 16384.0f  // 加速度计比例因子
+#define ALPHA       0.98f  // 互补滤波系数
 
 static float gyro_offset_x = 0.0f;
 static float gyro_offset_y = 0.0f;
