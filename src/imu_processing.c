@@ -12,13 +12,13 @@
 #define ACCEL_SCALE 16384.0f  // 加速度计比例因子
 #define ALPHA       0.98f  // 互补滤波系数
 
-static float gyro_offset_x = 0.0f;
-static float gyro_offset_y = 0.0f;
-static float gyro_offset_z = 0.0f;
+static float gyro_offset_x = 0.0f; // 陀螺仪偏移量
+static float gyro_offset_y = 0.0f; // 陀螺仪偏移量
+static float gyro_offset_z = 0.0f; // 陀螺仪偏移量
 
-static float current_pitch = 0.0f;
-static float current_roll = 0.0f;
-static float current_yaw = 0.0f;
+static float current_pitch = 0.0f; // 当前俯仰角
+static float current_roll = 0.0f; // 当前翻滚角
+static float current_yaw = 0.0f; // 当前偏航角
 
 void imu_calibrate(void) {
     gyro_offset_x = 0.0f;
