@@ -29,23 +29,23 @@ void imu_calibrate(void) { // 校准陀螺仪偏移量
     current_yaw = 0.0f;
 }
 
-euler_angles_t imu_update_angles(void *raw_data, float dt) {
-    euler_angles_t angles; 
+euler_angles_t imu_update_angles(void *raw_data, float dt) { // 更新姿态角
+    euler_angles_t angles;  // 定义姿态角结构体
     
-    angles.roll = current_roll;
-    angles.pitch = current_pitch;
-    angles.yaw = current_yaw;
-    return angles;
+    angles.roll = current_roll; // 使用当前翻滚角
+    angles.pitch = current_pitch; // 使用当前俯仰角
+    angles.yaw = current_yaw;  // 使用当前偏航角
+    return angles; // 返回当前姿态角
 }
 
-void imu_reset_orientation(void) {
+void imu_reset_orientation(void) { // 重置姿态角
     current_yaw = 0.0f; 
 }
 
-euler_angles_t imu_get_current_angles(void) {
-    euler_angles_t dummy_angles;
-    dummy_angles.pitch = current_pitch;
-    dummy_angles.roll = current_roll;
-    dummy_angles.yaw = current_yaw;
-    return dummy_angles;
+euler_angles_t imu_get_current_angles(void) {  // 获取当前姿态角
+    euler_angles_t dummy_angles; // 定义一个临时姿态角结构体
+    dummy_angles.pitch = current_pitch; // 使用当前俯仰角
+    dummy_angles.roll = current_roll;  //   使用当前翻滚角
+    dummy_angles.yaw = current_yaw; // 使用当前偏航角
+    return dummy_angles; // 返回当前姿态角
 }
