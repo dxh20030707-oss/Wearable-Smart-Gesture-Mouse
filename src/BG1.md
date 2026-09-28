@@ -483,3 +483,524 @@ int16_t offset_x = constrain(x, -6, 6);
 | `fillCircle(x, y, r, c)`   | 绘制实心圆。 | 常用于光标点、队列状态指示点。 |
 | `fillTriangle(...)`        | 绘制实心三角形。 | 传入三个顶点坐标，常用于滚动方向、展开折叠等指示箭头。 |
 | `drawPixel(x, y, c)`       | 控制单像素点亮/熄灭。 | 性能开销较低，适合通过循环绘制网格虚线或散点图。 |
+
+
+
+# IMU 姿态解算模块学习笔记 (`imu_processing`)
+
+## 1. 模块定位与架构
+本模块通常位于嵌入式传感器驱动层之上、应用业务层（如空中飞鼠、航模控制）之下，负责将 MPU6050 采集的原始数据转化为三维空间欧拉角（Euler Angles）。
+
+```
++------------------------------------+
+|  应用业务层 (如 mouse_mode.c)       |
++-----------------+------------------+
+                  |  调用 API (读欧拉角/复位)
+                  v
++-----------------+------------------+
+|  姿态解算层 (imu_processing.c/.h)  | <--- [当前模块]
++-----------------+------------------+
+                  |  获取 Raw Data
+                  v
++-----------------+------------------+
+|  底层驱动层 (mpu6050_driver.c/.h)  |
++------------------------------------+
+```
+
+---
+
+## 2. 核心数据结构与宏定义
+
+### 2.1 欧拉角结构体 (`euler_angles_t`)
+```c
+typedef struct {
+    float pitch; // 俯仰角 (绕 Y 轴旋转)
+    float roll;  // 翻滚角 (绕 X 轴旋转)
+    float yaw;   // 偏航角 / 航向角 (绕 Z 轴旋转)
+} euler_angles_t;
+```
+
+### 2.2 传感器转换系数与滤波参数
+* `GYRO_SCALE (65.5f)`：MPU6050 在 $\pm 500^\circ/\text{s}$ 量程下的灵敏度系数。将原始 ADC 整数除以此值可转换为度每秒 ($^\circ/\text{s}$)。
+* `ACCEL_SCALE (16384.0f)`：MPU6050 在 $\pm 2g$ 量程下的灵敏度系数。将原始加速度除以此值转换为重力加速度单位 $g$。
+* `ALPHA (0.98f)`：互补滤波加权系数。
+  $$\text{Angle} = \alpha \cdot (\text{Angle} + \text{Gyro} \cdot \Delta t) + (1 - \alpha) \cdot \text{AccAngle}$$
+  * 高频信任陀螺仪积分（动态快，无加速度振动干扰，但会漂移）。
+  * 低频信任加速度计倾角（静态准，依靠重力矢量校正漂移）。
+
+---
+
+## 3. 函数接口与职责
+
+| 函数原型 | 作用 | 典型触发场景 |
+| :--- | :--- | :--- |
+| `void imu_calibrate(void)` | 零漂校准与状态清零 | 系统上电启动、设备静止放置时 |
+| `euler_angles_t imu_update_angles(void *raw, float dt)` | 姿态解算主步进驱动 | 定时器中断或主循环（100Hz~500Hz 周期更新） |
+| `void imu_reset_orientation(void)` | 偏航角归零 (`current_yaw = 0`) | 用户按下飞鼠“对中/重新标定”实体按键时 |
+| `euler_angles_t imu_get_current_angles(void)` | 无副作用获取当前角度 | UI 渲染、按键轮询等其他非解算任务读取状态时 |
+
+---
+
+## 4. 关键设计亮点
+
+1. **信息隐藏与模块封装**
+   * 全局状态变量（`gyro_offset_*`、`current_*`）全部采用 `static` 修饰，避免全局命名污染，仅通过显式函数对外交互。
+2. **C / C++ 混编兼容**
+   * 头文件包含 `#ifdef __cplusplus extern "C" { #endif` 块，确保在 C++（如 Arduino 框架）下调用时符号不被修饰（Name Mangling）。
+3. **防御性编程**
+   * 对常数 `PI` 采用了 `#ifndef PI` 包裹，避免不同第三方库或 SDK 重复宏定义导致的编译警告/报错。
+
+---
+
+## 5. 后续完善方向（待实现项）
+
+- [ ] **完善校准算法**：在 `imu_calibrate()` 中实现静止多次（如 200 次）采样求均值，准确获取三轴零漂 offset。
+- [ ] **补全互补滤波解算**：在 `imu_update_angles()` 中将 `raw_data` 强转为具体加速度/陀螺仪结构体，完成重力倾角换算及互补滤波计算。
+- [ ] **漂移与万向锁处理**：当前 6 轴 IMU（无磁力计）Yaw 轴无绝对地磁参考，长时运行易漂移；若角度倾斜过大，后续可升级为四元数（Quaternion）更新以规避欧拉角奇异点问题。
+
+
+
+# ESP32 BLE 空中飞鼠系统源码全景深度学习笔记 (`mouse_mode`)
+
+---
+
+## 1. 模块架构与数据流总览
+
+本模块实现了一个兼具**空中飞鼠光标**与**虚拟平滑滚轮**的复合输入设备，通过宏观状态机标志位 `is_airmouse_locked` 划分了两种完全独立的控制拓扑：
+
+```
+                           +------------------------+
+                           |    updateMouseMode()   | <--- 主循环轮询 (高频调用)
+                           +-----------+------------+
+                                       |
+    +----------------------------------+----------------------------------+
+    |                                  |                                  |
+    v                                  v                                  v
++-----------------------+  +-----------------------+  +-----------------------+
+|  updateLockKeyLogic() |  |  updateSensKeyLogic() |  | updateNormalButtons() |
++-----------------------+  +-----------------------+  +-----------------------+
+| 检测 PIN_M1_PAUSE     |  | 检测 PIN_M1_SENS      |  | 检测左右键并根据状态机分流:
+| 翻转 is_airmouse_locked|  | 短按 +10% 循环步进    |  | [未锁定] -> 左/右键标准点击
+| 清空滤波残余与滚轮缓存|  | 长按(>400ms)自动连调  |  | [锁定]   -> 虚拟动力学滚轮
++-----------------------+  +-----------------------+  +-----------------------+
+                                       |
+                                       v
+                    +------------------------------------+
+                    |  !is_airmouse_locked 光标计算流程  |
+                    +------------------------------------+
+                    | 1. 12ms (约83Hz) 定时采样          |
+                    | 2. 扣除陀螺仪零漂校准值            |
+                    | 3. 原始层动态死区门限过滤          |
+                    | 4. DAMPING 阻尼衰减转换            |
+                    | 5. 一阶低通平滑滤波 (ALPHA=0.4)    |
+                    | 6. air_gain 增益放大               |
+                    | 7. 像素死区二次截断                |
+                    | 8. 发送 BleMouseDevice.move(x,y,0) |
+                    +------------------------------------+
+```
+
+---
+
+## 2. 全局与静态状态变量深度剖析
+
+```c
+extern BleMouse BleMouseDevice;
+extern uint8_t global_sens_percent;
+extern uint8_t global_wheel_sens_percent;
+extern SystemConfig g_cfg;
+```
+* **`BleMouse BleMouseDevice`**：由外部实例化（通常在主程序或蓝牙初始化文件）的 ESP32 BLE HID 鼠标对象，提供标准的 `press`、`release`、`move` 等蓝牙通信方法。
+* **`global_sens_percent / global_wheel_sens_percent`**：分别控制飞鼠光标与滚轮灵敏度的百分比系数（有效取值 $10 \sim 100$），步长为 $10$。
+* **`g_cfg`**：系统持久化配置结构体，内含 `air_gain`（增益放大倍数）、`deadzone_px`（像素死区）、`air_dpi_level` 及 `touch_dpi_level` 等字段。
+
+```c
+int16_t oled_mouse_x = 0;
+int16_t oled_mouse_y = 0;
+bool is_airmouse_locked = false;
+volatile int32_t mouseWheelCount = 0;
+int8_t g_scroll_dir = 0;
+```
+* **`oled_mouse_x / oled_mouse_y`**：记录当前帧经过处理后的位移量，暴露给外部 OLED 驱动用于在屏幕上绘制准心或十字光标微缩轨迹。
+* **`is_airmouse_locked`**：状态机切换标志。`false` 为常规飞鼠；`true` 为滚轮锁定模式。
+* **`mouseWheelCount`**：滚轮累计滚动格数。声明为 `volatile` 防止多任务或中断上下文优化，供 UI 实时展示滚动量。
+* **`g_scroll_dir`**：滚轮物理瞬时方向（`+1`：上滚，`-1`：下滚，`0`：静止）。
+
+```c
+int32_t gyro_offset_pitch = 0;
+int32_t gyro_offset_yaw = 0;
+
+const int16_t DAMPING = 120;
+static float smooth_dx = 0;
+static float smooth_dy = 0;
+const float FILTER_ALPHA = 0.4f;
+static unsigned long lastBleTime = 0;
+
+static float scroll_accumulator_up = 0.0f;
+static float scroll_accumulator_down = 0.0f;
+static unsigned long lastWheelTickTime = 0;
+```
+* **`gyro_offset_*`**：上电校准时累加求均值得到的静止零偏（静态误差），防止静止时鼠标自动飘移。
+* **`DAMPING (120)`**：将传感器高频 ADC 读数换算为基础位移的降速阻尼系数。
+* **`smooth_dx / smooth_dy`**：一阶低通滤波器的历史状态保持器。
+* **`FILTER_ALPHA (0.4f)`**：低通平滑权重系数。
+* **`scroll_accumulator_*`**：由于 HID 滚轮数据包只接收整型（`int8_t`，一次至少滚 1 格），当灵敏度较低时必须将每次计算的小数增量暂存在浮点累加器中，直到累加满 1.0 格才发送。
+
+---
+
+## 3. 函数级全流程深度逐行解析
+
+### 3.1 `initMouseMode(void)` —— 硬件与参数初始化
+
+#### 源码实现与逐行拆解：
+```c
+void initMouseMode() {
+    is_airmouse_locked = false;   // 1. 初始化状态：默认启用飞鼠光标，不锁定
+    mouseWheelCount = 0;          // 2. 清零滚轮总步数统计
+    scroll_accumulator_up = 0.0f; // 3. 清空向上滚轮小数累加器
+    scroll_accumulator_down = 0.0f;// 4. 清空向下滚轮小数累加器
+    smooth_dx = 0;                // 5. 清除 X 轴低通滤波历史残余
+    smooth_dy = 0;                // 6. 清除 Y 轴低通滤波历史残余
+    
+    // 7. 配置触摸按键引脚：由于外部触摸芯片通常高电平有效，设置为浮空输入模式
+    pinMode(PIN_M1_LEFT, INPUT);    // 左键 (GPIO)
+    pinMode(PIN_M1_RIGHT, INPUT);   // 右键 (GPIO)
+    pinMode(PIN_M1_PAUSE, INPUT);   // 锁定/暂停切换键 (GPIO 2)
+    pinMode(PIN_M1_SENS, INPUT);    // 灵敏度步进键 (GPIO 3)
+
+    // 8. 底层 MPU6050 初始化并等待总线稳定
+    mpu6050_init();
+    delay(50); 
+
+    // 9. 零漂静态标定（50次均值滤波）
+    gyro_offset_pitch = 0; 
+    gyro_offset_yaw = 0;
+    for (int i = 0; i < 50; i++) {
+        mpu6050_raw_data_t temp_data;
+        mpu6050_read_raw(&temp_data); 
+        
+        // 关键内存指针技巧：mpu6050_raw_data_t 内部是 7 个 int16_t（Accel 3轴, Temp 1个, Gyro 3轴）
+        // ptr[0]=Accel_X, ptr[1]=Accel_Y, ptr[2]=Accel_Z, ptr[3]=Temp, ptr[4]=Gyro_X, ptr[5]=Gyro_Y, ptr[6]=Gyro_Z
+        int16_t *ptr = (int16_t *)&temp_data; 
+        
+        // 此处飞鼠选取 ptr[5](Gyro_Y，即 Pitch 轴) 和 ptr[6](Gyro_Z，即 Yaw 轴) 进行累加
+        gyro_offset_pitch += ptr[5]; 
+        gyro_offset_yaw += ptr[6];
+        delay(5); // 每次采样间隔 5ms，总校准耗时 250ms
+    }
+    
+    // 10. 计算 50 次静态采样的算术平均值作为系统基准零偏
+    gyro_offset_pitch /= 50; 
+    gyro_offset_yaw /= 50;
+    Serial.println("[M1] 触摸按键版飞鼠模式初始化完成。");
+}
+```
+
+#### 函数设计亮点：
+* **结构体指针转换技巧 (`ptr[5] / ptr[6]`)**：通过将原始结构体强转为连续的 `int16_t*` 数组，避免了逐个引用具名成员的繁琐写法，直接提取角速度原始数据。
+* **物理轴映射对应**：
+  * **手腕左右晃动**：绕垂直 Z 轴旋转（Yaw，对应数据索引 `6`），映射到屏幕 **X 轴位移**。
+  * **手腕上下抬起**：绕横向 Y 轴旋转（Pitch，对应数据索引 `5`），映射到屏幕 **Y 轴位移**。
+
+---
+
+### 3.2 `updateLockKeyLogic(void)` —— 模式切换与状态清道夫
+
+#### 源码实现与逐行拆解：
+```c
+static void updateLockKeyLogic() {
+    static bool lastLockBtnState = TOUCH_RELEASED;
+    static unsigned long lockBtnDebounceTime = 0;
+    bool currentLockState = digitalRead(PIN_M1_PAUSE); // 读取锁定按键电平
+    
+    // 边沿变化判定
+    if (currentLockState != lastLockBtnState) {
+        // 软件去抖动：触发时间间隔必须大于 50ms
+        if (millis() - lockBtnDebounceTime > 50) {
+            lockBtnDebounceTime = millis();
+            
+            // 仅在上升沿（TOUCH_PRESSED，即手指刚按上按键的一瞬间）执行模式反转
+            if (currentLockState == TOUCH_PRESSED) {
+                is_airmouse_locked = !is_airmouse_locked; // 模式翻转核心
+                
+                // 状态环境清理（极为关键的工业级防粘连机制）：
+                g_scroll_dir = 0;
+                mouseWheelCount = 0;
+                scroll_accumulator_up = 0.0f;
+                scroll_accumulator_down = 0.0f;
+                smooth_dx = 0; // 清除飞鼠平滑器历史累加，避免切回光标时产生飞窜跳跃
+                smooth_dy = 0;
+
+                // 强制向主机发送按键弹起，防止切模式瞬间由于漏掉 Release 事件导致鼠标在系统层面“卡死按住”
+                BleMouseDevice.release(MOUSE_LEFT);
+                BleMouseDevice.release(MOUSE_RIGHT);
+
+                Serial.printf("🖱️ [M1] 状态切换 -> 滚轮锁定模式: %s\r\n", is_airmouse_locked ? "开启" : "关闭");
+            }
+            lastLockBtnState = currentLockState; // 同步状态
+        }
+    }
+}
+```
+
+#### 函数核心机制：
+* **模式切换时的状态隔离**：进入滚轮模式瞬间，不仅关停光标更新，还同步将 `smooth_dx/dy` 与 HID 按钮全部释放。如果用户按着左键拖拽文件时突然按暂停，该逻辑会切断长按状态，防止操作系统出现“粘滞键”逻辑 bug。
+
+---
+
+### 3.3 `updateSensKeyLogic(void)` —— 复合按键交互（短按调节 + 长按步进）
+
+#### 源码实现与逐行拆解：
+```c
+static void updateSensKeyLogic() {
+    static bool lastSensBtnState = TOUCH_RELEASED;
+    static unsigned long sensBtnPressTime = 0;
+    static unsigned long lastAutoStepTime = 0;
+    static bool isLongPressed = false;
+    bool currentSensState = digitalRead(PIN_M1_SENS);
+
+    // 1. 上升沿：手指触碰按键瞬间
+    if (currentSensState == TOUCH_PRESSED && lastSensBtnState == TOUCH_RELEASED) {
+        sensBtnPressTime = millis(); // 记录触摸开始时刻
+        isLongPressed = false;       // 复位长按标志
+        delay(5);                    // 微小延时避开接触瞬间电平毛刺
+    }
+    
+    // 2. 持续按住状态检测（长按自动连击动力学）
+    if (currentSensState == TOUCH_PRESSED) {
+        // 如果持续触摸时间超过 400ms，判定进入长按连调机制
+        if (millis() - sensBtnPressTime >= 400) {
+            isLongPressed = true;
+            // 连调频率限制：每 150ms 自动步进一次
+            if (millis() - lastAutoStepTime >= 150) {
+                lastAutoStepTime = millis();
+                
+                // 根据当前所属模式分别调整对应的参数
+                if (!is_airmouse_locked) {
+                    global_sens_percent += 10;
+                    if (global_sens_percent > 100) global_sens_percent = 10; // 达到 100% 自动回滚到 10%
+                    g_cfg.air_dpi_level = global_sens_percent / 10;          // 映射为 1~10 档位
+                } else {
+                    global_wheel_sens_percent += 10;
+                    if (global_wheel_sens_percent > 100) global_wheel_sens_percent = 10;
+                    g_cfg.touch_dpi_level = global_wheel_sens_percent / 10;
+                }
+                saveConfigToNVS(); // 每次连击步进都落盘到 ESP32 NVS 闪存
+            }
+        }
+    }
+    
+    // 3. 下降沿：手指离开触摸电极瞬间（短按单次触发）
+    if (currentSensState == TOUCH_RELEASED && lastSensBtnState == TOUCH_PRESSED) {
+        // 判定条件：没有触发过长按模式，且按压有效时间大于 25ms（滤除静电杂波脉冲）
+        if (!isLongPressed && (millis() - sensBtnPressTime > 25)) {
+            if (!is_airmouse_locked) {
+                global_sens_percent += 10;
+                if (global_sens_percent > 100) global_sens_percent = 10;
+                g_cfg.air_dpi_level = global_sens_percent / 10;
+            } else {
+                global_wheel_sens_percent += 10;
+                if (global_wheel_sens_percent > 100) global_wheel_sens_percent = 10;
+                g_cfg.touch_dpi_level = global_wheel_sens_percent / 10;
+            }
+            saveConfigToNVS(); // 单击落盘
+        }
+    }
+    lastSensBtnState = currentSensState; // 状态迭代
+}
+```
+
+#### 关键时序分析：
+* **防冲突设计**：通过 `isLongPressed` 标志锁。如果在长按过程中已经触发了多次自动连击，手指抬起时下降沿逻辑会被屏蔽，绝不会在连调结束时多跳一次步进。
+
+---
+
+### 3.4 `updateNormalButtons(void)` —— 按键复用与滚轮平滑引擎
+
+这是整个代码中分支最复杂的核心逻辑，根据 `is_airmouse_locked` 的状态决定是输出鼠标按键还是虚拟滚轮。
+
+#### 3.4.1 分支 A：正常模式（鼠标点击映射）
+```c
+if (!is_airmouse_locked) {
+    scroll_accumulator_up = 0.0f;   // 处于非锁定模式，滚轮累加器时刻清零
+    scroll_accumulator_down = 0.0f;
+
+    // 左键 20ms 去抖与按下/释放事件
+    if (currLeft != lastLeftState) {
+        if (now - lastLeftDebounce > 20) {
+            lastLeftDebounce = now;
+            if (currLeft == TOUCH_PRESSED) {
+                BleMouseDevice.press(MOUSE_LEFT);   // 发送 HID Mouse Report：左键置 1
+            } else {
+                BleMouseDevice.release(MOUSE_LEFT); // 发送 HID Mouse Report：左键置 0
+            }
+            lastLeftState = currLeft;
+        }
+    }
+
+    // 右键 20ms 去抖与按下/释放事件
+    if (currRight != lastRightState) {
+        if (now - lastRightDebounce > 20) {
+            lastRightDebounce = now;
+            if (currRight == TOUCH_PRESSED) {
+                BleMouseDevice.press(MOUSE_RIGHT);  // 发送 HID Mouse Report：右键置 1
+            } else {
+                BleMouseDevice.release(MOUSE_RIGHT);// 发送 HID Mouse Report：右键置 0
+            }
+            lastRightState = currRight;
+        }
+    }
+}
+```
+
+#### 3.4.2 分支 B：滚轮锁定模式（虚拟动力学滚轮）
+在此模式下，左右键被重映射为滚轮的“向上”和“向下”。
+
+##### 第一步：触摸瞬发（首包零延迟响应）
+```c
+// 左键（向上）边沿检测
+if (currLeft != lastLeftState) {
+    if (now - lastLeftDebounce > 20) {
+        lastLeftDebounce = now;
+        lastLeftState = currLeft;
+        if (currLeft == TOUCH_PRESSED) {
+            // 🚀 核心触感优化：手指刚碰上去的一瞬间，不走动力学累加，直接强发 1 格滚轮
+            BleMouseDevice.move(0, 0, 1);
+            g_scroll_dir = 1;
+            mouseWheelCount += 1;
+            scroll_accumulator_up = 0.0f; // 重置累加器，准备进入持续长按
+        } else {
+            // 🛑 瞬时刹车：手指松开电极瞬间，物理状态立刻置零，停止一切滚动
+            g_scroll_dir = 0;
+            scroll_accumulator_up = 0.0f;
+        }
+    }
+}
+// （右键向下检测逻辑同理，发送 BleMouseDevice.move(0, 0, -1)）
+```
+
+##### 第二步：长按动力学累加器（20ms 周期连发引擎）
+```c
+if (now - lastWheelTickTime >= 20) {
+    lastWheelTickTime = now;
+
+    // 动力学数学映射公式：
+    // speed 取值范围为 [0.05, 0.85]
+    // 对应灵敏度从 10% 到 100%
+    float speed = 0.05f + ((float)global_wheel_sens_percent / 100.0f) * 0.80f;
+
+    // 左键长按：持续向上累加
+    if (currLeft == TOUCH_PRESSED && lastLeftState == TOUCH_PRESSED) {
+        scroll_accumulator_up += speed; // 累加小数增量
+        
+        // 当累加值超过 1.0 时触发实际 HID 滚轮数据包
+        if (scroll_accumulator_up >= 1.0f) {
+            int8_t step = (int8_t)scroll_accumulator_up; // 取整数部分（例如 1.25 -> 1）
+            scroll_accumulator_up -= step;               // 扣除整数，保留小数余量 (0.25)
+            BleMouseDevice.move(0, 0, step);             // 发送滚轮报告
+            mouseWheelCount += step;
+        }
+    }
+
+    // 右键长按：持续向下累加
+    if (currRight == TOUCH_PRESSED && lastRightState == TOUCH_PRESSED) {
+        scroll_accumulator_down += speed;
+        if (scroll_accumulator_down >= 1.0f) {
+            int8_t step = (int8_t)scroll_accumulator_down;
+            scroll_accumulator_down -= step;
+            BleMouseDevice.move(0, 0, -step);            // 发送滚轮向下步进
+            mouseWheelCount -= step;
+        }
+    }
+}
+```
+
+---
+
+### 3.5 `updateMouseMode(void)` —— 主任务执行与 IMU 滤波核心算法
+
+#### 源码实现与算法拆解：
+```c
+void updateMouseMode() {
+    // 1. 连接状态卫语句：若蓝牙未与电脑/手机建立连接，则不消耗算力计算直接返回
+    if (!BleMouseDevice.isConnected()) return;
+
+    // 2. 依次轮询三个按键子状态机
+    updateLockKeyLogic();
+    updateSensKeyLogic();
+    updateNormalButtons();
+
+    // 3. 飞鼠光标核心处理流（仅在未锁定模式运行）
+    if (!is_airmouse_locked) {
+        unsigned long now = millis();
+        // 频率控制器：限制在 12ms 执行一次（约 83.3Hz 采样率）
+        if (now - lastBleTime >= 12) {
+            lastBleTime = now;
+            
+            // A. 读取 MPU6050 原始 ADC 数据
+            mpu6050_raw_data_t my_mpu_data;
+            mpu6050_read_raw(&my_mpu_data);
+            int16_t *data_ptr = (int16_t *)&my_mpu_data;
+            
+            // B. 零漂消除 (校准补偿)
+            int16_t cal_pitch = data_ptr[5] - gyro_offset_pitch;
+            int16_t cal_yaw   = data_ptr[6] - gyro_offset_yaw;
+            
+            // C. 动态原始死区过滤 (Dynamic Deadzone)
+            // 根据配置的死区放大 40 倍与原始传感器值比对
+            int16_t dynamic_deadzone = (int16_t)(g_cfg.deadzone_px * 40);
+            int16_t f_pitch = (abs(cal_pitch) > dynamic_deadzone) ? cal_pitch : 0;
+            int16_t f_yaw   = (abs(cal_yaw)   > dynamic_deadzone) ? cal_yaw   : 0;
+            
+            // D. 阻尼衰减转换
+            float target_dx = (float)f_yaw / DAMPING;
+            float target_dy = (float)f_pitch / DAMPING;
+            
+            // E. 一阶滞后低通平滑滤波 (Low-Pass Filter)
+            // 公式：Smooth_k = Smooth_{k-1} + Alpha * (Target - Smooth_{k-1})
+            smooth_dx = smooth_dx + FILTER_ALPHA * (target_dx - smooth_dx);
+            smooth_dy = smooth_dy + FILTER_ALPHA * (target_dy - smooth_dy);
+            
+            // F. 应用用户全局增益放大倍数并强转整型像素
+            int16_t move_x = (int16_t)(smooth_dx * g_cfg.air_gain);
+            int16_t move_y = (int16_t)(smooth_dy * g_cfg.air_gain);
+            
+            // G. 输出级像素死区截断：如果移动距离不足设定像素，强行归零（彻底根除微弱手抖）
+            if (abs(move_x) <= g_cfg.deadzone_px) move_x = 0;
+            if (abs(move_y) <= g_cfg.deadzone_px) move_y = 0;
+            
+            // H. 发送蓝牙 HID 报告
+            if (move_x != 0 || move_y != 0) {
+                BleMouseDevice.move(move_x, move_y, 0);
+            }
+            
+            // 同步给 OLED 显示
+            oled_mouse_x = move_x; 
+            oled_mouse_y = move_y;
+        }
+    } else {
+        // 滚轮锁定模式下，光标输出清零
+        oled_mouse_x = 0; 
+        oled_mouse_y = 0;
+    }
+}
+```
+
+---
+
+## 4. 关键算法数学模型与设计亮点归纳
+
+### 4.1 双级死区架构（Dual Deadzone System）
+* **一级死区（原始传感器层）**：
+  $$\text{Threshold}_{\text{raw}} = \text{deadzone\_px} \times 40$$
+  * 作用于从 MPU6050 刚读出的 16 位整型数据，目的是在进行浮点运算和除以 120 的阻尼衰减前，**彻底切断 MPU6050 内部热敏白噪声引起的最低有效位（LSB）翻转**，避免无意义的浮点运算开销。
+* **二级死区（屏幕像素层）**：
+  $$\text{if } \vert{}move\vert{} \le \text{deadzone\_px} \implies move = 0$$
+  * 作用于低通滤波和 `air_gain` 放大之后的最终整型，目的是**消除人体肌肉在紧握或点击按键时的生理性微颤动**，保证用户在单击按键时鼠标指针绝对稳固，不产生位移偏移。
+
+### 4.2 一阶低通滤波器设计（First-Order Low-Pass Filter）
+代码中采用的滤波方程为：
+$$\text{Output}_k = \text{Output}_{k-1} + \alpha \cdot (\text{Input}_k - \text{Output}_{k-1})$$
+* **为什么 $\alpha = 0.4$**：
+  * 若 $\alpha \to 1.0$：无平滑效果，光标会有明显的陀螺仪阶梯锯齿感。
+  * 若 $\alpha \le 0.1$：极其平滑，但光标会有明显的“拖拽感/迟滞感”（类似在泥浆中移动）。
+  * 取值 $0.4$ 是在高频 83Hz 采样下兼顾**跟手性**与**平滑轨迹**的最佳平衡点。
