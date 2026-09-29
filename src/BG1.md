@@ -1004,3 +1004,132 @@ $$\text{Output}_k = \text{Output}_{k-1} + \alpha \cdot (\text{Input}_k - \text{O
   * 若 $\alpha \to 1.0$：无平滑效果，光标会有明显的陀螺仪阶梯锯齿感。
   * 若 $\alpha \le 0.1$：极其平滑，但光标会有明显的“拖拽感/迟滞感”（类似在泥浆中移动）。
   * 取值 $0.4$ 是在高频 83Hz 采样下兼顾**跟手性**与**平滑轨迹**的最佳平衡点。
+
+
+# MPU6050 底层 I2C 硬件驱动模块学习笔记 (`mpu6050_driver`)
+
+## 1. 模块定位与职责
+
+该模块属于系统的最底层驱动层（BSP / HAL 层），直接使用硬件 I2C 控制器与物理传感器通信，主要职责包括：
+1. **硬件就绪验证**：开机核验传感器物理通信与器件 ID。
+2. **寄存器工作态配置**：唤醒芯片、配置量程与硬件滤波参数。
+3. **高效连读打包**：采用单次 Burst Read 读取 14 字节连续寄存器，并做大端字节序拼接，生成结构化物理原始数据。
+
+```
++-------------------------------------------------------+
+| 姿态/飞鼠上层算法 (imu_processing.c / mouse_mode.cpp)  |
++---------------------------+---------------------------+
+                            | 调用 mpu6050_read_raw()
+                            v
++-------------------------------------------------------+
+|          MPU6050 底层驱动 (mpu6050_driver)             | <--- [当前模块]
++---------------------------+---------------------------+
+                            | 400kHz I2C 连续读写
+                            v
++-------------------------------------------------------+
+|                   MPU6050 传感器芯片                  |
++-------------------------------------------------------+
+```
+
+---
+
+## 2. 数据结构与寄存器映射
+
+### 2.1 结构体内存对齐 (`mpu6050_raw_data_t`)
+```c
+typedef struct {
+    int16_t accel_x; // 0x3B (高) / 0x3C (低)
+    int16_t accel_y; // 0x3D (高) / 0x3E (低)
+    int16_t accel_z; // 0x3F (高) / 0x40 (低)
+    int16_t temp;    // 0x41 (高) / 0x42 (低) [内部温度计]
+    int16_t gyro_x;  // 0x43 (高) / 0x44 (低) [Roll 轴]
+    int16_t gyro_y;  // 0x45 (高) / 0x46 (低) [Pitch 轴]
+    int16_t gyro_z;  // 0x47 (高) / 0x48 (低) [Yaw 轴]
+} mpu6050_raw_data_t;
+```
+* **内存连续性**：共 7 个 `int16_t`，合计连续占用 14 字节，与 MPU6050 内部从寄存器 `0x3B` 到 `0x48` 的物理存储完全一一对应。
+* **上层指针复用**：这也是为什么在上层飞鼠代码中能够直接使用 `(int16_t*)&temp_data` 并通过 `ptr[5]`、`ptr[6]` 精准索引用到 Pitch 和 Yaw 轴的硬件基础。
+
+---
+
+## 3. 关键寄存器与硬件初始化逻辑
+
+### 3.1 驱动初始化步骤解析 (`mpu6050_init`)
+
+```c
+bool mpu6050_init(void) {
+    // 1. 引脚配置与超频提升吞吐
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    Wire.setClock(400000); // 400kHz 快速模式 (I2C Fast Mode)
+
+    // 2. 自检验证 WHO_AM_I
+    Wire.beginTransmission(MPU6050_ADDR);
+    Wire.write(MPU6050_WHO_AM_I);
+    Wire.endTransmission(false); // Restart 信号，不释放总线
+    Wire.requestFrom((uint16_t)MPU6050_ADDR, (uint8_t)1);
+    if (!Wire.available() || Wire.read() != 0x68) return false;
+
+    // 3. 解除休眠 (Power Management 1)
+    write_register(MPU6050_PWR_MGMT_1, 0x00);
+
+    // 4. 陀螺仪量程配置 (±500°/s)
+    write_register(MPU6050_GYRO_CONFIG, 0x08);
+
+    // 5. 加速度计量程配置 (±2g)
+    write_register(MPU6050_ACCEL_CONFIG, 0x00);
+
+    // 6. 开启片上硬件数字低通滤波器 (DLPF)
+    write_register(MPU6050_CONFIG, 0x03);
+
+    return true;
+}
+```
+
+### 3.2 寄存器参数设置深度对照
+
+| 寄存器名 | 地址 | 写入值 | 硬件行为与工程考量 |
+| :--- | :--- | :--- | :--- |
+| `PWR_MGMT_1` | `0x6B` | `0x00` | **唤醒芯片**。MPU6050 上电默认处于 SLEEP 模式（省电停摆），写 0 唤醒内部振荡器与 ADC。 |
+| `GYRO_CONFIG`| `0x1B` | `0x08` | `FS_SEL = 1`（即第 3 位置 1）。设定量程为 **$\pm 500^\circ/\text{s}$**，灵敏度严格匹配算法层的 `GYRO_SCALE (65.5f)`。 |
+| `ACCEL_CONFIG`| `0x1C` | `0x00`| `AFS_SEL = 0`。设定量程为最高精度的 **$\pm 2g$**，灵敏度严格匹配算法层的 `ACCEL_SCALE (16384.0f)`。 |
+| `CONFIG` | `0x1A` | `0x03` | `DLPF_CFG = 3`。开启芯片内部低通滤波器，将陀螺仪带宽截断至 **44Hz**（延迟约 4.8ms），在硬件采集端提前吸收按键点击或电机震动的机械高频噪声。 |
+
+---
+
+## 4. 高性能连续读取机制 (`mpu6050_read_raw`)
+
+### 4.1 核心代码
+```c
+void mpu6050_read_raw(mpu6050_raw_data_t *data) {
+    if (data == nullptr) return;
+
+    Wire.beginTransmission(MPU6050_ADDR);
+    Wire.write(MPU6050_ACCEL_XOUT_H); // 写入起始地址 0x3B
+    Wire.endTransmission(false);        // 发送 Repeated Start，维持总线占用
+
+    Wire.requestFrom((uint16_t)MPU6050_ADDR, (uint8_t)14); // 突发读取 14 字节
+
+    if (Wire.available() == 14) {
+        // 大端模式拼接：(MSB << 8) | LSB
+        data->accel_x = (int16_t)((Wire.read() << 8) | Wire.read());
+        data->accel_y = (int16_t)((Wire.read() << 8) | Wire.read());
+        data->accel_z = (int16_t)((Wire.read() << 8) | Wire.read());
+        data->temp    = (int16_t)((Wire.read() << 8) | Wire.read());
+        data->gyro_x  = (int16_t)((Wire.read() << 8) | Wire.read());
+        data->gyro_y  = (int16_t)((Wire.read() << 8) | Wire.read());
+        data->gyro_z  = (int16_t)((Wire.read() << 8) | Wire.read());
+    }
+}
+```
+
+### 4.2 为什么必须使用 `Wire.endTransmission(false)`（重启动信号）？
+* 在标准 I2C 通信中，如果传入 `true`，主机会发出 **STOP 条件** 释放总线。当多个从机挂载在总线上时，这会给其他设备插队的机会。
+* 传入 `false` 会发出 **RESTART 条件**，主机持续霸占总线并立即将从机切换为接收模式（`requestFrom`），防止通信被意外打断。
+
+### 4.3 为什么必须一次性读 14 字节（Burst Read）？
+1. **防止数据撕裂（Data Tearing）**：
+   * MPU6050 的高低字节以及不同轴的数据是在同一个内部时钟周期更新锁存的。
+   * 如果分 7 次单独读取，可能出现刚读完高 8 位，芯片内部就更新了传感器，再读低 8 位就会拼出荒谬的跳变错误值。一次性连读可在内部影子寄存器中锁定同一次采样的完整快照。
+2. **极大提升传输效率**：
+   * 每次单独发寄存器地址都有开销（Start + 寻址 + ACK + Stop）。
+   * 采用连续突发读取，只需发一次起始地址 `0x3B`，内部地址计数器会自动自增，直接读空 14 个字节，节省约 60% 的总线通信耗时。

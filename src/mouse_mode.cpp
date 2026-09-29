@@ -93,8 +93,8 @@ static void updateNormalButtons() { // 非滚轮锁定模式下的按键处理
         // --- 1. 左键（向上滚动）触摸检测 ---
         if (currLeft != lastLeftState) {  // 检测左键状态变化
             if (now - lastLeftDebounce > 20) { // 去抖动处理，20ms 内忽略状态变化
-                lastLeftDebounce = now;
-                lastLeftState = currLeft;
+                lastLeftDebounce = now; // 更新时间戳,记录当前时间
+                lastLeftState = currLeft; // 更新上次左键状态为当前状态
                 if (currLeft == TOUCH_PRESSED) { // 左键按下，发送鼠标滚轮向上事件
                     // 触摸瞬间立刻响应 1 格首包（零延迟触感）
                     BleMouseDevice.move(0, 0, 1); // 发送滚轮向上事件
@@ -240,12 +240,12 @@ static void updateSensKeyLogic() { // 灵敏度调节逻辑
                 global_sens_percent += 10; // 每次增加 10%
                 if (global_sens_percent > 100) global_sens_percent = 10;    // 超过 100% 后回绕到 10%
                 g_cfg.air_dpi_level = global_sens_percent / 10; // 更新配置
-            } else {
+            } else { // 触摸模式下，调节触摸灵敏度
                 global_wheel_sens_percent += 10; // 每次增加 10%
                 if (global_wheel_sens_percent > 100) global_wheel_sens_percent = 10;    // 超过 100% 后回绕到 10%
                 g_cfg.touch_dpi_level = global_wheel_sens_percent / 10; // 更新配置
             }
-            saveConfigToNVS();
+            saveConfigToNVS(); // 保存配置到 NVS
         }
     }
     lastSensBtnState = currentSensState;      // 更新上次触摸按键状态
