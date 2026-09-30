@@ -10,8 +10,8 @@ extern SystemConfig g_cfg; //  from config.h
 
 int16_t oled_touch_x = 0;   // 触控板第一个触点的 X 坐标
 int16_t oled_touch_y = 0;    // 触控板第一个触点的 Y 坐标
-int16_t oled_touch2_x = 0;     
-int16_t oled_touch2_y = 0;     
+int16_t oled_touch2_x = 0;   // 触控板第二个触点的 X 坐标   
+int16_t oled_touch2_y = 0;     // 触控板第二个触点的 Y 坐标
 uint8_t oled_touch_points = 0; 
 uint8_t oled_click_count = 0;
 

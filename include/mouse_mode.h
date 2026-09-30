@@ -7,8 +7,8 @@
 extern "C" {
 #endif
 
-void initMouseMode();
-void updateMouseMode();
+void initMouseMode(); // Initialize the mouse mode
+void updateMouseMode(); // Update the mouse mode
 
 #ifdef __cplusplus
 }
