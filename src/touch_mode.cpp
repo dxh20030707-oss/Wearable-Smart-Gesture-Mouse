@@ -1,15 +1,15 @@
-#include "touch_mode.h"
+#include "touch_mode.h"  
 #include "config.h"
 #include "display_mode.h"
 #include <BleMouse.h>
 #include <Arduino.h>
 #include <Wire.h>
 
-extern BleMouse BleMouseDevice;
-extern SystemConfig g_cfg;
+extern BleMouse BleMouseDevice; //  from ble_mouse.h
+extern SystemConfig g_cfg; //  from config.h
 
-int16_t oled_touch_x = 0;
-int16_t oled_touch_y = 0;
+int16_t oled_touch_x = 0;   // 触控板第一个触点的 X 坐标
+int16_t oled_touch_y = 0;    // 触控板第一个触点的 Y 坐标
 int16_t oled_touch2_x = 0;     
 int16_t oled_touch2_y = 0;     
 uint8_t oled_touch_points = 0; 
