@@ -12,10 +12,10 @@ int16_t oled_touch_x = 0;   // 触控板第一个触点的 X 坐标
 int16_t oled_touch_y = 0;    // 触控板第一个触点的 Y 坐标
 int16_t oled_touch2_x = 0;   // 触控板第二个触点的 X 坐标   
 int16_t oled_touch2_y = 0;     // 触控板第二个触点的 Y 坐标
-uint8_t oled_touch_points = 0; 
-uint8_t oled_click_count = 0;
+uint8_t oled_touch_points = 0;  // 触控板当前检测到的触点数量 (0, 1, or 2)
+uint8_t oled_click_count = 0;// 触控板触点的点击次数
 
-#define FT6336U_I2C_ADDR    0x38  
+#define FT6336U_I2C_ADDR    0x38   // FT6336U I2C 地址
 #define FT_REG_TD_STATUS    0x02  
 #define FT_REG_P1_XH        0x03  
 #define FT_REG_P2_XH        0x09  
