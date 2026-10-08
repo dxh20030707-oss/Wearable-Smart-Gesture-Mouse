@@ -16,40 +16,40 @@ uint8_t oled_touch_points = 0;  // 触控板当前检测到的触点数量 (0, 1
 uint8_t oled_click_count = 0;// 触控板触点的点击次数
 
 #define FT6336U_I2C_ADDR    0x38   // FT6336U I2C 地址
-#define FT_REG_TD_STATUS    0x02  
-#define FT_REG_P1_XH        0x03  
-#define FT_REG_P2_XH        0x09  
+#define FT_REG_TD_STATUS    0x02  // FT6336U 触点状态寄存器地址
+#define FT_REG_P1_XH        0x03  // FT6336U 第一个触点的 X 坐标高字节寄存器地址
+#define FT_REG_P2_XH        0x09  // FT6336U 第二个触点的 X 坐标高字节寄存器地址
 
-volatile bool ft_interrupt_flag = false; 
-void IRAM_ATTR handleTouchINT_ISR() {
+volatile bool ft_interrupt_flag = false; // 标记 FT6336U 触控中断事件发生
+void IRAM_ATTR handleTouchINT_ISR() { // 中断服务程序，标记触控中断事件
     ft_interrupt_flag = true; 
 }
 
-static bool readFT6336U_Dual(int16_t &x1, int16_t &y1, int16_t &x2, int16_t &y2, uint8_t &points) {
-    Wire.beginTransmission(FT6336U_I2C_ADDR);
-    Wire.write(FT_REG_TD_STATUS);
-    if (Wire.endTransmission() != 0) return false; 
+static bool readFT6336U_Dual(int16_t &x1, int16_t &y1, int16_t &x2, int16_t &y2, uint8_t &points) { // 读取 FT6336U 双触点数据
+    Wire.beginTransmission(FT6336U_I2C_ADDR);// 向 FT6336U 发送 I2C 地址
+    Wire.write(FT_REG_TD_STATUS); // 请求读取触点状态寄存器
+    if (Wire.endTransmission() != 0) return false;  // 检查 I2C 传输是否成功
 
-    Wire.requestFrom(FT6336U_I2C_ADDR, 1);
-    if (!Wire.available()) return false;
-    points = Wire.read() & 0x0F; 
+    Wire.requestFrom(FT6336U_I2C_ADDR, 1); // 请求读取一个字节的数据
+    if (!Wire.available()) return false; // 检查是否有数据可用
+    points = Wire.read() & 0x0F;  // 读取触点数量 (0, 1, or 2)
 
-    if (points == 0) {
-        x1 = 0; y1 = 0; x2 = 0; y2 = 0;
-        return true; 
+    if (points == 0) {  // 没有触点，重置坐标
+        x1 = 0; y1 = 0; x2 = 0; y2 = 0; // 重置坐标
+        return true; // 返回成功
     }
 
-    if (points == 1) {
-        Wire.beginTransmission(FT6336U_I2C_ADDR);
-        Wire.write(FT_REG_P1_XH); 
-        if (Wire.endTransmission() != 0) return false;
+    if (points == 1) {  // 只有一个触点，读取第一个触点的坐标
+        Wire.beginTransmission(FT6336U_I2C_ADDR);  // 向 FT6336U 发送 I2C 地址
+        Wire.write(FT_REG_P1_XH);   // 请求读取第一个触点的 X 坐标高字节寄存器
+        if (Wire.endTransmission() != 0) return false; // 检查 I2C 传输是否成功
 
-        Wire.requestFrom(FT6336U_I2C_ADDR, 4);
-        if (Wire.available() == 4) {
-            uint8_t xh = Wire.read(); uint8_t xl = Wire.read();
-            uint8_t yh = Wire.read(); uint8_t yl = Wire.read();
-            x1 = ((xh & 0x0F) << 8) | xl;
-            y1 = ((yh & 0x0F) << 8) | yl;
+        Wire.requestFrom(FT6336U_I2C_ADDR, 4);  // 请求读取 4 个字节的数据 (X 高字节, X 低字节, Y 高字节, Y 低字节)
+        if (Wire.available() == 4) {  // 检查是否有 4 个字节的数据可用
+            uint8_t xh = Wire.read(); uint8_t xl = Wire.read();  // 读取第一个触点的 X 坐标高字节和低字节
+            uint8_t yh = Wire.read(); uint8_t yl = Wire.read();         // 读取第一个触点的 Y 坐标高字节和低字节
+            x1 = ((xh & 0x0F) << 8) | xl; // 计算第一个触点的 X 坐标
+            y1 = ((yh & 0x0F) << 8) | yl; // 计算第一个触点的 Y 坐标
             x2 = 0; y2 = 0; 
             return true;
         }
