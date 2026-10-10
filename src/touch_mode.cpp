@@ -247,85 +247,85 @@ void updateTouchMode() {  // 更新触控板状态并处理鼠标事件
                     }
 
                     if (actual_physical_points == 2) {  // 如果实际检测到的触控点数量是2，则计算当前双指触控的距离，并判断是否发生了缩放操作
-                        int16_t currentDist = sqrt(pow(p1x - p2x, 2) + pow(p1y - p2y, 2));
-                        int16_t distDelta = currentDist - lastTouchDist;
+                        int16_t currentDist = sqrt(pow(p1x - p2x, 2) + pow(p1y - p2y, 2));  // 计算当前双指触控的距离
+                        int16_t distDelta = currentDist - lastTouchDist; // 计算当前双指触控的距离与上一次双指触控的距离的差值
 
-                        if (abs(distDelta) >= ZOOM_THRESHOLD) {
-                            isDualFingerMoving = true; 
-                            if (millis() - lastTouchMouseSendTime >= 40) {
-                                lastTouchMouseSendTime = millis();
-                                BleMouseDevice.press(MOUSE_MIDDLE); 
-                                if (distDelta > 0) BleMouseDevice.move(0, 0, 1); 
-                                else BleMouseDevice.move(0, 0, -1);
-                                delay(5);
-                                BleMouseDevice.release(MOUSE_MIDDLE); 
+                        if (abs(distDelta) >= ZOOM_THRESHOLD) { // 如果双指触控的距离变化超过缩放阈值，则处理缩放手势
+                            isDualFingerMoving = true;  // 标记正在处理双指触控的距离变化
+                            if (millis() - lastTouchMouseSendTime >= 40) { // 如果距离上一次发送鼠标滚轮事件的时间超过40毫秒，则发送鼠标滚轮事件
+                                lastTouchMouseSendTime = millis();  // 记录上一次发送鼠标滚轮事件的时间
+                                BleMouseDevice.press(MOUSE_MIDDLE);  // 按下鼠标中键
+                                if (distDelta > 0) BleMouseDevice.move(0, 0, 1);  // 如果双指触控的距离变大，则向上滚动
+                                else BleMouseDevice.move(0, 0, -1); // 如果双指触控的距离变小，则向下滚动
+                                delay(5); // 延迟一段时间，确保鼠标滚轮事件发送完成
+                                BleMouseDevice.release(MOUSE_MIDDLE);  // 释放鼠标中键
                             }
-                            lastTouchDist = currentDist;
-                            lastP1Y = p1y; lastP2Y = p2y;
+                            lastTouchDist = currentDist;  // 记录上一次双指触控的距离
+                            lastP1Y = p1y; lastP2Y = p2y;  // 记录上一次检测到的两个触点的 Y 坐标
                         } 
                         else {
-                            int16_t total_offset_p1 = p1y - dualStartP1Y;
-                            int16_t total_offset_p2 = p2y - dualStartP2Y;
-                            int16_t current_total_offset = (total_offset_p1 + total_offset_p2) / 2;
+                            int16_t total_offset_p1 = p1y - dualStartP1Y;  // 记录第一个触点的总偏移量
+                            int16_t total_offset_p2 = p2y - dualStartP2Y;  // 记录第二个触点的总偏移量
+                            int16_t current_total_offset = (total_offset_p1 + total_offset_p2) / 2;  // 计算两个触点的平均总偏移量
 
-                            if (abs(current_total_offset) >= AUTO_SCROLL_THRESHOLD) {
-                                isDualFingerMoving = true; 
+                            if (abs(current_total_offset) >= AUTO_SCROLL_THRESHOLD) {  // 如果两个触点的平均总偏移量超过自动滚动阈值，则处理双指不松手滑动滚动
+                                isDualFingerMoving = true;  // 标记正在处理双指不松手滑动滚动
 
-                                unsigned long current_time = millis();
-                                if (current_time - lastAutoScrollTime >= AUTO_SCROLL_INTERVAL) {
-                                    lastAutoScrollTime = current_time;
+                                unsigned long current_time = millis();  // 获取当前时间
+                                if (current_time - lastAutoScrollTime >= AUTO_SCROLL_INTERVAL) {  // 如果距离上一次自动滚动事件的时间超过自动滚动事件发送间隔，则发送鼠标滚轮事件
+                                    lastAutoScrollTime = current_time;  // 记录上一次自动滚动事件的时间
 
-                                    int8_t scroll_dir = (current_total_offset > 0) ? -1 : 1;
-                                    BleMouseDevice.move(0, 0, scroll_dir);
+                                    int8_t scroll_dir = (current_total_offset > 0) ? -1 : 1;  // 如果两个触点的平均总偏移量大于0，则向下滚动，否则向上滚动
+                                    BleMouseDevice.move(0, 0, scroll_dir);  // 发送鼠标滚轮事件
                                 }
                             }
                         }
-                        lastTouchDist = currentDist;
+                        lastTouchDist = currentDist;  // 记录上一次双指触控的距离
                     }
                 }
                 
-                if (actual_physical_points > 0) {
-                    lastPoints = touch_points;
+                if (actual_physical_points > 0) {  // 如果实际检测到的触控点数量大于0，则更新上一次检测到的触控点数量
+                    lastPoints = touch_points;  // 更新上一次检测到的触控点数量
                 }
             }
         }
         
         // C. 手指抬起判定
-        if (isTouching && touch_points == 0) {
-            isTouching = false;
-            touchReleaseTime = millis();
-            oled_touch_points = 0; 
+        if (isTouching && touch_points == 0) {  // 如果当前没有触控点按下，则处理手指抬起事件
+            isTouching = false;  // 标记当前没有触控点按下
+            touchReleaseTime = millis();  // 记录触控释放时间
+            oled_touch_points = 0;   // 更新 OLED 显示的触控点数量为0
             
-            if (isDragging) {
-                BleMouseDevice.release(MOUSE_LEFT); 
-                isDragging = false;
-                hasMoved = true;
+            if (isDragging) { // 如果当前处于拖拽状态，则释放鼠标左键，并标记不再处于拖拽状态
+                BleMouseDevice.release(MOUSE_LEFT);   // 释放鼠标左键
+                isDragging = false;  // 标记不再处于拖拽状态
+                hasMoved = true;  // 标记触控过程中发生了移动
             }
-            if (wasDualScrolling) hasMoved = true; 
+            if (wasDualScrolling) hasMoved = true;  // 如果刚刚结束了双指滚动操作，则标记触控过程中发生了移动
             
-            if (maxPointsInCurrentGesture == 2) {
-                if ((touchReleaseTime - dualTouchStartTime < 300) && (!isDualFingerMoving)) {
-                    BleMouseDevice.click(MOUSE_RIGHT);
-                    clickCount = 0; 
-                    hasMoved = true; 
+            if (maxPointsInCurrentGesture == 2) {  // 如果当前手势中检测到的最大触控点数量是2，则判断是否发生了双指点击事件
+                if ((touchReleaseTime - dualTouchStartTime < 300) && (!isDualFingerMoving)) { // 如果双指操作持续时间小于300毫秒，并且没有发生双指移动，则触发右键点击事件
+                    BleMouseDevice.click(MOUSE_RIGHT); // 触发右键点击事件
+                    clickCount = 0;  // 重置点击计数器
+                    hasMoved = true;  // 标记触控过程中发生了移动
                 }
             }
 
-            if (!hasMoved && (touchReleaseTime - touchStartTime < TIMEOUT_WINDOW)) {
-                clickCount++;
+            if (!hasMoved && (touchReleaseTime - touchStartTime < TIMEOUT_WINDOW)) {  // 如果触控过程中没有发生移动，并且触控持续时间小于时间窗口，则增加点击计数器
+                clickCount++;  // 增加点击计数器
             }
-            oled_click_count = clickCount;
-            wasDualScrolling = false; 
-            isDualFingerMoving = false; 
-            maxPointsInCurrentGesture = 0;
+            oled_click_count = clickCount;  // 更新 OLED 显示的点击次数
+            wasDualScrolling = false;  // 标记不再处于双指滚动状态  
+            isDualFingerMoving = false;  // 标记不再处于双指移动状态 
+            maxPointsInCurrentGesture = 0;  // 重置当前手势中检测到的最大触控点数量
         }
     }
 
-    if (clickCount > 0 && !isTouching && (millis() - touchReleaseTime > TIMEOUT_WINDOW)) {
-        switch (clickCount) {
-            case 1: BleMouseDevice.click(MOUSE_LEFT); break;
-            case 2: BleMouseDevice.click(MOUSE_LEFT); BleMouseDevice.click(MOUSE_LEFT); break;
+    if (clickCount > 0 && !isTouching && (millis() - touchReleaseTime > TIMEOUT_WINDOW)) { // 如果点击计数器大于0，并且当前没有触控点按下，并且距离触控释放时间超过时间窗口，则根据点击计数器的值触发相应的鼠标点击事件
+        switch (clickCount) {// 根据点击计数器的值触发相应的鼠标点击事件
+            case 1: BleMouseDevice.click(MOUSE_LEFT); break;  // 触发单击事件 
+            case 2: BleMouseDevice.click(MOUSE_LEFT); BleMouseDevice.click(MOUSE_LEFT); break;  // 触发双击事件
         }
-        clickCount = 0; oled_click_count = 0; 
+        clickCount = 0; oled_click_count = 0;  // 重置点击计数器
     }
 }
